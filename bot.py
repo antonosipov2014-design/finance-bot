@@ -7,14 +7,16 @@ import io
 import re
 from datetime import datetime
 from oauth2client.service_account import ServiceAccountCredentials
+import threading
+from flask import Flask
 
-# ===== ТОКЕНЫ И КЛЮЧИ БЕРУТСЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ НА RENDER =====
+# ===== ТОКЕНЫ И КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL")
 MY_USER_ID = int(os.getenv("MY_USER_ID", 0))
 
-# ===== ПРОВЕРКА, ЧТО ВСЕ ПЕРЕМЕННЫЕ ЗАДАНЫ =====
+# ===== ПРОВЕРКА ПЕРЕМЕННЫХ =====
 if not all([TELEGRAM_TOKEN, DEEPSEEK_API_KEY, GOOGLE_SHEET_URL, MY_USER_ID]):
     raise ValueError("❌ Ошибка: не все переменные окружения заданы! Проверьте настройки Render.")
 
@@ -85,7 +87,6 @@ def handle_file(message):
             bot.send_message(message.chat.id, "❌ Поддерживаются только .xlsx, .xls, .csv")
             return
         
-        # Авто-определение колонок
         date_col, amount_col, desc_col = None, None, None
         for col in df.columns:
             c = str(col).lower()
@@ -242,6 +243,23 @@ def start(message):
 """
     bot.send_message(message.chat.id, welcome)
 
-# ===== ЗАПУСК =====
-print("✅ Финансовый аналитик запущен!")
-bot.infinity_polling()
+# ===== ЗАПУСК БОТА И ВЕБ-СЕРВЕРА ДЛЯ RENDER =====
+if __name__ == "__main__":
+    # Запускаем бота в отдельном потоке
+    def run_bot():
+        print("✅ Финансовый аналитик запущен!")
+        bot.infinity_polling()
+    
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
+    
+    # Создаём веб-сервер для Render
+    app = Flask(__name__)
+    
+    @app.route('/')
+    def index():
+        return "Бот работает!"
+    
+    # Render ожидает порт 10000
+    app.run(host='0.0.0.0', port=10000)

@@ -5,10 +5,10 @@ import gspread
 import pandas as pd
 import io
 import re
-from datetime import datetime
-from oauth2client.service_account import ServiceAccountCredentials
 import threading
+from datetime import datetime
 from flask import Flask
+from oauth2client.service_account import ServiceAccountCredentials
 
 # ===== ТОКЕНЫ И КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -16,7 +16,6 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL")
 MY_USER_ID = int(os.getenv("MY_USER_ID", 0))
 
-# ===== ПРОВЕРКА ПЕРЕМЕННЫХ =====
 if not all([TELEGRAM_TOKEN, DEEPSEEK_API_KEY, GOOGLE_SHEET_URL, MY_USER_ID]):
     raise ValueError("❌ Ошибка: не все переменные окружения заданы! Проверьте настройки Render.")
 
@@ -32,7 +31,42 @@ def get_sheet():
     client = gspread.authorize(creds)
     return client.open_by_url(GOOGLE_SHEET_URL).sheet1
 
-# ===== ФУНКЦИИ РАБОТЫ С ТАБЛИЦЕЙ =====
+# ===== ФУНКЦИИ ДЛЯ ИСТОРИИ ДИАЛОГА =====
+def save_to_history(user_id, role, text):
+    """Сохраняет сообщение в историю (в Google Sheets)"""
+    try:
+        sheet = get_sheet()
+        # Если листа для истории нет — создаём
+        try:
+            history_sheet = sheet.worksheet("История")
+        except:
+            history_sheet = sheet.add_worksheet(title="История", rows=1000, cols=10)
+            history_sheet.append_row(["Дата", "Роль", "Текст"])
+        
+        history_sheet.append_row([
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            role,
+            text
+        ])
+    except Exception as e:
+        print(f"Ошибка сохранения истории: {e}")
+
+def get_recent_history(user_id, limit=100):
+    """Загружает последние 100 сообщений из истории"""
+    try:
+        sheet = get_sheet()
+        history_sheet = sheet.worksheet("История")
+        records = history_sheet.get_all_records()
+        if not records:
+            return []
+        
+        recent = records[-limit:] if len(records) > limit else records
+        return recent
+    except Exception as e:
+        print(f"Ошибка загрузки истории: {e}")
+        return []
+
+# ===== ФУНКЦИИ РАБОТЫ С ТРАНЗАКЦИЯМИ =====
 def load_data():
     try:
         sheet = get_sheet()
@@ -71,7 +105,7 @@ def is_authorized(message):
 def restricted(message):
     bot.send_message(message.chat.id, "🔒 Этот бот — личный помощник его владельца. Доступ запрещён.")
 
-# ===== ОБРАБОТКА ФАЙЛОВ =====
+# ===== ОБРАБОТКА ФАЙЛОВ (Excel/CSV) =====
 @bot.message_handler(content_types=['document'], func=is_authorized)
 def handle_file(message):
     bot.send_message(message.chat.id, "📂 Принимаю файл... Разбираю транзакции.")
@@ -87,6 +121,7 @@ def handle_file(message):
             bot.send_message(message.chat.id, "❌ Поддерживаются только .xlsx, .xls, .csv")
             return
         
+        # Авто-определение колонок
         date_col, amount_col, desc_col = None, None, None
         for col in df.columns:
             c = str(col).lower()
@@ -158,108 +193,108 @@ def add_debt(message):
     )
     bot.send_message(message.chat.id, f"✅ Долг запомнен: {text}")
 
-# ===== ОБРАБОТКА ВОПРОСОВ =====
+# ===== ОБРАБОТКА ВОПРОСОВ С ИСТОРИЕЙ =====
 @bot.message_handler(func=lambda message: is_authorized(message) and not message.text.startswith('/'))
 def handle_question(message):
     user_text = message.text
+    user_id = message.from_user.id
+    
+    # Сохраняем вопрос в историю
+    save_to_history(user_id, "user", user_text)
+    
+    bot.send_message(message.chat.id, "🧮 Думаю...")
+    
+    # Загружаем последние 100 сообщений из истории
+    history = get_recent_history(user_id, limit=100)
+    
+    # Формируем контекст из истории
+    context = ""
+    for record in history:
+        role = "Пользователь" if record['Роль'] == "user" else "Бот"
+        context += f"{role}: {record['Текст']}\n"
+    
+    # Загружаем финансовые данные
     df = load_data()
-    if df.empty:
-        bot.send_message(
-            message.chat.id,
-            "📭 У меня пока нет данных. Отправьте файл выписки из банка или добавьте долги командой /debt."
-        )
-        return
+    financial_summary = ""
+    if not df.empty:
+        income = df[df['Сумма'] > 0]['Сумма'].sum()
+        expense = df[df['Сумма'] < 0]['Сумма'].sum()
+        balance = income + expense
+        
+        cat_expense = df[df['Сумма'] < 0].groupby('Категория')['Сумма'].sum().abs()
+        top_cats = cat_expense.sort_values(ascending=False).head(5)
+        top_text = "\n".join([f"  • {cat}: {val:,.0f} ₽" for cat, val in top_cats.items()])
+        
+        financial_summary = f"""
+Твои финансовые данные:
+- Доходы: {income:,.0f} ₽
+- Расходы: {abs(expense):,.0f} ₽
+- Баланс: {balance:,.0f} ₽
+Основные категории расходов:
+{top_text}
+"""
     
-    bot.send_message(message.chat.id, "🧮 Анализирую данные...")
-    
-    income = df[df['Сумма'] > 0]['Сумма'].sum()
-    expense = df[df['Сумма'] < 0]['Сумма'].sum()
-    balance = income + expense
-    
-    cat_expense = df[df['Сумма'] < 0].groupby('Категория')['Сумма'].sum().abs()
-    top_cats = cat_expense.sort_values(ascending=False).head(5)
-    top_text = "\n".join([f"  • {cat}: {val:,.0f} ₽" for cat, val in top_cats.items()])
-    
-    debts = df[df['Тип'] == 'Долг']['Описание'].tolist()
-    debts_text = "\n".join([f"  • {d}" for d in debts]) if debts else "Нет долгов"
-    
-    summary = f"""
-    Всего транзакций: {len(df)}
-    Доходы: {income:,.0f} ₽
-    Расходы: {abs(expense):,.0f} ₽
-    Баланс: {balance:,.0f} ₽
-    
-    Основные категории расходов:
-    {top_text}
-    
-    Долги:
-    {debts_text}
-    """
-    
+    # Формируем промпт для DeepSeek
     prompt = f"""
-    Ты — ИИ-аналитик финансовых данных. У тебя есть данные о транзакциях пользователя.
-    Вот сводка:
-    {summary}
-    
-    Вопрос пользователя: "{user_text}"
-    
-    Ответь на вопрос максимально точно, используя только данные из сводки.
-    Если данных недостаточно — скажи честно и предложи, что нужно добавить.
-    Если вопрос требует расчётов — проведи их.
-    
-    Ответ должен быть на русском языке, коротким и понятным.
-    """
+Ты — умный ИИ-помощник. Ты отвечаешь на любые вопросы пользователя, используя контекст диалога и финансовые данные, если они есть.
+
+Вот история вашего диалога (последние сообщения):
+{context}
+
+{financial_summary}
+
+Вопрос пользователя: "{user_text}"
+
+Ответь на вопрос максимально полезно и естественно. Если вопрос касается финансов, используй данные выше. Если вопрос общий — ответь как DeepSeek.
+"""
     
     try:
         response = openai.ChatCompletion.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=1500
         )
         answer = response.choices[0].message.content
+        
+        # Сохраняем ответ в историю
+        save_to_history(user_id, "bot", answer)
+        
         bot.send_message(message.chat.id, f"💬 {answer}")
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Ошибка при обращении к DeepSeek: {str(e)}")
+        bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
 
 # ===== КОМАНДА /START =====
 @bot.message_handler(commands=['start'], func=is_authorized)
 def start(message):
     welcome = """
-💰 Привет! Я твой личный финансовый аналитик.
+💰 Привет! Я твой умный финансовый аналитик с бесконечной памятью.
 
 Я умею:
 1. 📂 Принимать выписки из банка (.xlsx, .csv)
 2. 💸 Запоминать долги (/debt Кому и сколько)
-3. 📊 Отвечать на любые вопросы по твоим финансам
+3. 🧠 Помнить всю историю диалога (в Google Sheets)
+4. 📊 Отвечать на любые вопросы по твоим финансам
+5. 🌍 Отвечать на любые общие вопросы (как DeepSeek)
 
-Просто отправь мне файл или задай вопрос — и я помогу разобраться с деньгами.
-
-Примеры вопросов:
-• Сколько я потратил на такси?
-• Какой у меня средний чек?
-• Смогу ли я выплатить долги до нового года?
-• На что я трачу больше всего?
+Просто задавай вопросы — я помню всё, что мы обсуждали!
 """
     bot.send_message(message.chat.id, welcome)
 
 # ===== ЗАПУСК БОТА И ВЕБ-СЕРВЕРА ДЛЯ RENDER =====
 if __name__ == "__main__":
-    # Запускаем бота в отдельном потоке
     def run_bot():
-        print("✅ Финансовый аналитик запущен!")
+        print("✅ Финансовый аналитик запущен с бесконечной памятью!")
         bot.infinity_polling()
     
     bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()
     
-    # Создаём веб-сервер для Render
     app = Flask(__name__)
     
     @app.route('/')
     def index():
-        return "Бот работает!"
+        return "Бот работает с бесконечной памятью!"
     
-    # Render ожидает порт 10000
     app.run(host='0.0.0.0', port=10000)

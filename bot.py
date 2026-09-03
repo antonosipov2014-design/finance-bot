@@ -21,22 +21,25 @@ if not all([TELEGRAM_TOKEN, DEEPSEEK_API_KEY, GOOGLE_SHEET_URL, MY_USER_ID]):
 
 # ===== НАСТРОЙКА =====
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-openai.api_key = DEEPSEEK_API_KEY
-openai.api_base = "https://api.deepseek.com/v1"
+
+# ИНИЦИАЛИЗАЦИЯ КЛИЕНТА OPENAI (НОВЫЙ СИНТАКСИС)
+client = openai.OpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com/v1"
+)
 
 # ===== ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS =====
 def get_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
-    client = gspread.authorize(creds)
-    return client.open_by_url(GOOGLE_SHEET_URL).sheet1
+    gclient = gspread.authorize(creds)
+    return gclient.open_by_url(GOOGLE_SHEET_URL).sheet1
 
 # ===== ФУНКЦИИ ДЛЯ ИСТОРИИ ДИАЛОГА =====
 def save_to_history(user_id, role, text):
     """Сохраняет сообщение в историю (в Google Sheets)"""
     try:
         sheet = get_sheet()
-        # Если листа для истории нет — создаём
         try:
             history_sheet = sheet.worksheet("История")
         except:
@@ -234,7 +237,7 @@ def handle_question(message):
 {top_text}
 """
     
-    # Формируем промпт для DeepSeek
+    # Формируем промпт для DeepSeek (НОВЫЙ СИНТАКСИС)
     prompt = f"""
 Ты — умный ИИ-помощник. Ты отвечаешь на любые вопросы пользователя, используя контекст диалога и финансовые данные, если они есть.
 
@@ -249,7 +252,8 @@ def handle_question(message):
 """
     
     try:
-        response = openai.ChatCompletion.create(
+        # НОВЫЙ СПОСОБ ВЫЗОВА CHAT COMPLETIONS
+        response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
@@ -262,7 +266,7 @@ def handle_question(message):
         
         bot.send_message(message.chat.id, f"💬 {answer}")
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+        bot.send_message(message.chat.id, f"❌ Ошибка при обращении к DeepSeek: {str(e)}")
 
 # ===== КОМАНДА /START =====
 @bot.message_handler(commands=['start'], func=is_authorized)
